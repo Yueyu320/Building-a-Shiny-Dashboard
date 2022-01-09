@@ -1,8 +1,6 @@
 Building a Shiny Dashboard
 ---
 
-<br/>
-
 ## Overview
 
 The goal of this assignment is to create a shiny app / dashboard that would allow a user to explore student grades from a central database. We have simplified this somewhat by providing a local copy of the database `data/gradebook.sqlite` and you only need to consider the case where a single concurrent user is interacting with the data. Below are a series of tasks that progressively introduce the requirements of your shiny app, your final app must meet all of the requirements but the tasks are organized to help you work towards the final product by adding features one at a time.
