@@ -1,0 +1,376 @@
+---
+title: "Building a Shiny Dashboard"
+output: html_document
+runtime: shiny
+---
+
+## Setup
+
+```{r setup, message=FALSE}
+library(tidyverse)
+library(shiny)
+library(RSQLite)
+library(tidyquery)
+library(DT)
+options(dplyr.summarise.inform = FALSE)
+```
+
+## Task 1
+
+The overall objective in Task 1 is to present and visualize assignment scores for each student in a dynamic way taking inputs from the user via R shiny app. The side panel on R Shiny UI allows user to input a department and class to run the dashboard. The user's options to select a class would depend on selected Department (which can be "ALL"), implementation of which resides in function `renderUI()` in the server section of R shiny codebase. The action button - check - on side panel triggers the function to fetch assignment scores from SQL database gradebook. The reactive expression `main_table()`, tied to check button, is responsible for fetching raw data from SQL database and filter the scores based on the department/class received as inputs from R Shiny UI. We then define a new reactive expression `gen_gradetable()` to combine any results from task 3 and to assist to present the results in the form of table, as well as the summary statistics and visualization of distribution of scores in the class. The `renderDataTable()` function is responsible for data formatting by converting the fetched results from long format to wide format and assigning yellow background color to missing values. The `renderPlot()` function gets the histogram plots for various assignment scores, and we also use the function `renderTable()` to generate a summary statistics table. It is to be noted that the action of fetching data from SQL database is contingent on check button which means that user has to click on check button in order to refresh the results after changing the department or class inputs.
+
+## Task 2
+
+The R Shiny UI gives an option to the user to calculate final grade for each student. This is accomplished via the "Calculate final grades" checkbox. The user is required to input weights for various assignment types (project, exam, paper etc.) which should be between 0 and 1 and also sum up to 1 to be able to calculate the final grades. The default option gives equal weights to all assignment types; however, you can also specify your own weights and then click the button "Save this weight setting" so the specified weights will become default for this class. The reactive expression `grade()` makes sure that weights pass sanity checks such as greater than 0, less than 1 and that weights sum up to 1. This function also calculates the final grade of each student by first joining total points for each assignment from SQL table assignments. We calculate mean performance on each assignment type and then apply weights on assignment types to arrive at final grades for each student. A new column "final grade" will be added to the table at the end. It is to be noted that missing scores for any student is assumed as if the student missed the assignment and score for that particular assignment is assumed to be 0. In addition, we give users the option to specify cutoff points for the final letter grade of A, B, C, P (pass), F (fail), if the user has already chosen to calculate the final grade. The cutoffs must be between 0 and 1, and follow an reasonable order. A new column "letter grade" will be added to the table after the column "final grade".
+
+## Task 3
+
+The R Shiny UI gives an option to the user to make corrections (as well as to impute missing values) to the database, in other words, change the points of any assignment of any student in the selected class. This is accomplished by clicking the "Edit points" button, and then a modal dialog will pop out where user can select/input whatever they want. It is worth noting that the `numericInput()` widget is bounded up by the total points of the selected assignment, but we do not give any hard constraints in case any bonus points are given, or any other special cases can be handled. The interactive procedure is fundamentally in the database level, so we use "insert" or "update" instead of rewriting the entire table. Once the correction procedure is finished, the reactive expression `gen_gradetable()` will be updated automatically, while the original database remains unchanged. This is achieved through the design that querying from `gradebook` database and generating `gen_gradetable()` are two separated processes.
+
+
+## Shiny App
+
+```{r}
+run_gradebook <- function(){
+  db = DBI::dbConnect(RSQLite::SQLite(), "./data/gradebook.sqlite")
+  class = dbGetQuery(db, 'SELECT DISTINCT class FROM gradebook') %>%
+    separate(class, sep = " ", into = c("dept", "num"))
+  all <- data.frame(dept = "all", num = paste(class$dept, class$num) %>% stringr::str_to_upper())
+  class <- rbind(class, all)
+  
+  dbc = DBI::dbConnect(RSQLite::SQLite(), "./data/corrections.sqlite")
+  dbWriteTable(dbc, "correction",
+               tibble(class = character(),
+                      student = character(),
+                      assignment = character(),
+                      points = integer()))
+  dbs = DBI::dbConnect(RSQLite::SQLite(), "./data/settings.sqlite")
+  dbWriteTable(dbs, "setting",
+               tibble(class = character(), 
+                      assignment = character(),
+                      weight = double()))
+  
+  shinyApp(
+      # UI
+      ui = fluidPage(
+        titlePanel("Gradebook"),
+        sidebarLayout(
+        sidebarPanel = sidebarPanel(
+          # task 1
+          selectInput("s.dept", "Department", choices = class$dept %>% 
+                        stringr::str_to_upper() %>% str_sort() %>% unique()),
+          uiOutput("class_num"),
+          actionButton("check", "Check", icon = NULL),
+          
+          # task 2
+          checkboxInput("options", "Calculate final grades", value = FALSE),
+          uiOutput("cal_grade"),
+          
+          # task 3
+          actionButton("edit", "Edit points")
+          
+        ),
+        mainPanel = mainPanel(
+          h4("Note that missing values will be highlighted in yellow."),
+          dataTableOutput("gradetable"),
+          br(),
+          plotOutput("plot"),
+          br(),
+          tableOutput("summary")
+        )
+       )
+      ),
+      
+      # SERVER
+      server = function(input, output, session) {
+        # task 1
+        output$class_num = renderUI({
+          num = class %>% filter(dept == stringr::str_to_lower(input$s.dept)) %>% 
+            arrange(num) %>% pull(num) %>% unique()
+          selectInput("s.num", "Class", choices = num)
+        })
+        
+        main_table <- eventReactive(input$check, {
+          selected_class = ifelse(input$s.dept == "ALL",
+                                  input$s.num %>% stringr::str_to_lower(),
+                                  paste(input$s.dept, input$s.num) %>% stringr::str_to_lower())
+          dplyr::tbl(db, "gradebook") %>%
+            filter(class == selected_class)
+        })
+        
+        gen_gradetable <- eventReactive(input$check | input$go, {
+          selected_class = main_table() %>% pull(class) %>% unique()
+          corr_table = dplyr::tbl(dbc, "correction") %>%
+            filter(class == selected_class)
+          cropped_main_table = main_table() %>%
+            anti_join(corr_table, 
+                      by = c("class", "student", "assignment"), copy = TRUE)
+          return(cropped_main_table %>%
+            dplyr::union(corr_table, copy = TRUE))
+        })
+
+        output$gradetable = renderDataTable({
+          table <- gen_gradetable() %>%
+            dplyr::collect() %>%
+            arrange(student, assignment) %>%
+            pivot_wider(id_cols = student, names_from = assignment, values_from = points) 
+          if(input$options == TRUE) {
+            table <- table %>%
+              left_join(grade(), by = c("student"))
+            if(input$letter == TRUE) {
+              table <- table %>%
+                left_join(lettergrade(), by = c("student"))
+            }
+          }
+          return(
+              datatable(table) %>%
+                formatStyle(names(table), backgroundColor = styleEqual(NA, "yellow"))
+          )
+        })
+        
+        summary_stat = reactive({
+          req(input$check)
+          gen_gradetable() %>% 
+            dplyr::collect() %>%
+            pivot_wider(id_cols = c("class", "student"), 
+                        names_from = "assignment", values_from = "points", values_fill = 0) %>%
+            pivot_longer(cols = -c("class", "student"), names_to = "assignment", 
+                         values_to = "points") %>%
+            left_join(dplyr::tbl(db, "assignments"), by = c("class", "assignment"), 
+                      copy = TRUE) %>%
+            mutate(percentage = points / total_pts * 100)
+        })
+        
+        output$plot = renderPlot({
+          summary_stat() %>%
+            ggplot() +
+            geom_histogram(aes(x = percentage, fill = assignment), bins = 15) +
+            facet_grid(cols = vars(assignment)) +
+            labs(x = "Score (percentage)", 
+                 fill = "Assignments",
+                 title = "Distribution of scores for different assignments") +
+            theme_bw()
+        })
+        
+        output$summary <- renderTable({
+          summary_stat() %>%
+            group_by(assignment) %>%
+            summarize(Min = min(percentage), 
+                    First_quartile = quantile(percentage, 0.25),
+                    Mean = mean(percentage),
+                    Median = median(percentage),
+                    Third_quartile = quantile(percentage, 0.75),
+                    Max = max(percentage)) %>%
+            ungroup() %>%
+            rename(Assignment = assignment)
+        }, caption = "Summary Statistics", caption.placement = "top")
+  
+        
+        # task 2
+        assignments <- reactive({
+          gen_gradetable() %>%
+            arrange(assignment) %>%
+            pull(assignment) %>%
+            stringr::str_extract("[a-z]+") %>%
+              unique()
+        })
+        
+        output$cal_grade = renderUI({
+          req(input$check)
+          if(input$options == TRUE){
+            # check the setting database
+            setting = dplyr::tbl(dbs, "setting") %>%
+              dplyr::collect() %>%
+              filter(class == gen_gradetable() %>% pull(class) %>% unique())
+            
+            a = lapply(seq_along(assignments()), function(i){
+              numericInput(assignments()[i],
+                           paste("The weight of", assignments()[i]), min = 0, max = 1,
+                           value = ifelse(nrow(setting != 0),
+                                          setting %>% 
+                                            filter(assignment == assignments()[i]) %>%
+                                            pull(weight),
+                                          round(1/length(assignments()), 2)), 
+                           step = 0.01)
+            })
+            
+            b = actionButton("svst", "Save this weight setting")
+            c = checkboxInput("letter", "Calculate letter grades", value = FALSE)
+            d = uiOutput("cutoffs")
+            return(c(a, list(b), list(c), list(d)))
+          }
+          else
+            return(NULL)
+        })
+        
+        output$cutoffs = renderUI({
+           if(input$letter == TRUE){
+             a = numericInput("a", "Cutoff for A (scores required for A)", 
+                              min = 0, max = 1, value = 0.8, step = 0.01)
+             b = numericInput("b", "Cutoff for B (scores required for B)", 
+                              min = 0, max = 1, value = 0.7, step = 0.01)
+             c = numericInput("c", "Cutoff for C (scores required for C)", 
+                              min = 0, max = 1, value = 0.6, step = 0.01)
+             p = numericInput("p", "Cutoff for Pass (scores required for Pass)", 
+                              min = 0, max = 1, value = 0.5, step = 0.01)
+           return(list(a, b, c, p))  
+          }
+          else {
+            return(NULL)
+          }
+        })
+        
+        grade <- reactive({
+          req(input$check)
+          walk(seq_along(assignments()), function(i){
+              req(input[[assignments()[i]]])
+          })
+          # validate for weights
+          walk(seq_along(assignments()), function(i){
+              validate(need(input[[assignments()[i]]] > 0, "Weights need to be greater than 0"))
+          })
+          walk(seq_along(assignments()), function(i){
+              validate(need(input[[assignments()[i]]] < 1, "Weights need to be less than 1"))
+          })
+          validate(
+            need(abs(1-sum(sapply(seq_along(assignments()), function(i){
+              input[[assignments()[i]]]
+            }))) == 0, "Weights need to sum up to 1")
+          )
+
+          # weight table
+          weight_tbl = tibble(
+            type = assignments(),
+            weight = sapply(seq_along(assignments()), function(i){
+              input[[assignments()[i]]]
+            })
+          )
+
+          # result
+          summary_stat() %>%
+            mutate(type = stringr::str_extract(assignment, "[a-z]+"),
+                   percent = percentage / 100) %>%
+            group_by(student, type) %>%
+            summarise(final = mean(percent)) %>%
+            ungroup() %>%
+            left_join(weight_tbl, by = c("type")) %>%
+            mutate(final = final * weight) %>%
+            group_by(student) %>%
+            summarise(`final grade` = round(sum(final), 3)) %>%
+            ungroup()
+        })
+        
+        lettergrade <- reactive({
+          validate(
+            need(input$p > 0, "Cutoff needs to be greater than 0"),
+            need(input$c > input$p, "Cutoff for C needs to be greater than that for Pass"),
+            need(input$b > input$c, "Cutoff for B needs to be greater than that for C"),
+            need(input$a > input$b, "Cutoff for A needs to be greater than that for B")
+          )  
+          grade() %>%
+            mutate(`letter grade` = case_when(
+              `final grade` >=  input$a ~ "A",
+              `final grade` >= input$b & `final grade` < input$a ~ "B",
+              `final grade` >= input$c &`final grade` < input$b ~ "C",
+              `final grade` >= input$p &`final grade` < input$c ~ "P",
+              `final grade` < input$p ~ "F")) %>%
+            select(-c(`final grade`))
+        })
+        
+        observeEvent(input$svst, {
+          selected_class <- gen_gradetable() %>% pull(class) %>% unique()
+          n <- dplyr::tbl(dbs, "setting") %>%
+            dplyr::collect() %>%
+            filter(class == selected_class) %>%
+            nrow()
+          for(i in seq_along(assignments())) {
+              A = gen_gradetable() %>% pull(class) %>% unique()
+              B = assignments()[i]
+              C = input[[assignments()[i]]]
+              if(n == 0){
+                syntax = glue::glue("INSERT INTO setting (class, assignment, weight)
+                                VALUES ('{A}', '{B}', {C});")
+              }
+              else {
+                syntax = glue::glue("UPDATE setting SET weight={C}
+                                WHERE class='{A}' AND assignment='{B}';")
+              }
+              q = dbSendQuery(dbs, syntax)
+              DBI::dbClearResult(q)
+          }
+          # pop-up message
+          showModal(modalDialog(
+            title = "Success",
+            "You have saved this weight setting!"
+          ))
+        })
+
+        
+        # task 3
+        observeEvent(input$edit, {
+          showModal(modalDialog(
+            "Please input corrent information:",
+            selectInput("e.student", "Student name", selected = "",
+                        choices = gen_gradetable() %>% arrange(student) %>% pull(student)),
+            selectInput("e.assign", "Assignment", selected = "",
+                        choices = gen_gradetable() %>% arrange(assignment) %>% 
+                          pull(assignment) %>% unique()),
+            uiOutput("spe_value"),
+            title = "Edit student's score",
+            actionButton("go", "Submit")
+            ))
+        })
+        
+        output$spe_value <- renderUI({
+          selected_class <- gen_gradetable() %>% pull(class) %>% unique()
+          selected_assignment <- input$e.assign
+          selected_student <- input$e.student
+          curr <- gen_gradetable() %>% 
+            filter(student == selected_student,
+                   assignment == selected_assignment) %>%
+            pull(points) 
+          max_ <- dplyr::tbl(db, "assignments") %>%
+            filter(class == selected_class,
+                   assignment == selected_assignment) %>%
+            pull(total_pts)
+          return(numericInput("e.points", "Correct points", value = curr, min = 0, 
+                              max = max_, step = 1))
+        })
+     
+        observeEvent(input$go, {
+          A = ifelse(input$s.dept == "ALL", 
+                     input$s.num %>% stringr::str_to_lower(),
+                     paste(input$s.dept, input$s.num) %>% stringr::str_to_lower())
+          B = input$e.student
+          C = input$e.assign
+          D = input$e.points
+          # check existence 
+          len <- dplyr::tbl(dbc, "correction") %>%
+            filter(class == A, student == B, assignment == C) %>%
+            dplyr::collect() %>%
+            nrow()
+          # insert or update
+          if(len == 0) {
+            syntax = glue::glue("INSERT INTO correction (class, student, assignment, points) 
+                                VALUES ('{A}', '{B}', '{C}', {D});")
+          } else {
+            syntax = glue::glue("UPDATE correction SET points={D}
+                                WHERE class='{A}' AND student='{B}' AND assignment='{C}';")
+          }
+          # execute the query
+          q = dbSendQuery(dbc, syntax)
+          DBI::dbClearResult(q)
+          # pop-up message
+          showModal(modalDialog(
+            title = "Success",
+            "You have changed the score!"
+          ))
+        })
+      }
+    )
+}
+```
+
+```{r run}
+run_gradebook()
+```

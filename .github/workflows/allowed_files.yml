@@ -1,0 +1,18 @@
+on: push
+name: Check Allowed Files
+jobs:
+  check:
+    runs-on: self-hosted
+    container:
+      image: ghcr.io/sta523-fa21/sta523-base:latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@master
+    - name: Check Files
+      run: |
+        checklist::quit_on_failure({
+          checklist::check_allowed_files(
+            c("hw5.Rmd", "hw5.Rproj", "README.md", "data/gradebook.sqlite", "data/corrections.sqlite", "data/settings.sqlite")
+          )
+        })
+      shell: Rscript {0}

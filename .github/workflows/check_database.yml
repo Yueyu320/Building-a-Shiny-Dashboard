@@ -1,0 +1,21 @@
+on: push
+name: Check Database Integrity
+jobs:
+  check:
+    runs-on: self-hosted
+    container:
+      image: ghcr.io/sta523-fa21/sta523-base:latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@master
+    - name: Install openssl  
+      run: |
+        install2.r openssl
+    - name: Check sha256
+      run: |
+        stopifnot(
+          "gradebook database has been modified, which is not allowed. Please restore the original version." = 
+          as.character(openssl::sha256(file("data/gradebook.sqlite"))) == 
+          "0b9aeb588b844578fd0d5fe3d7ebba23678697b0ab202bde3401a8b5496ebfb5"
+        )
+      shell: Rscript {0}
